@@ -1,0 +1,834 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Starvore.io — Prototype amélioré</title>
+<style>
+  html,body { height:100%; margin:0; background:#071028; color:#fff; font-family:Inter, Roboto, sans-serif; }
+  canvas { display:block; background: radial-gradient(ellipse at center, #001427 0%, #071028 60%, #000 100%); width:100%; height:100%; }
+  #hud {
+    position:fixed; left:12px; top:12px; z-index:10;
+    background:rgba(0,0,0,0.25); padding:10px 12px; border-radius:10px; backdrop-filter:blur(4px);
+    box-shadow:0 6px 20px rgba(0,0,0,0.6);
+  }
+  #hud .bar { width:220px; height:12px; background:rgba(255,255,255,0.08); border-radius:8px; overflow:hidden; margin-top:6px; }
+  #hud .bar-inner { height:100%; width:0%; background:linear-gradient(90deg,#ff9a00,#ff2d2d); }
+  #hud .info { font-size:14px; margin-bottom:6px; }
+  #msg {
+    position:fixed;right:12px;top:12px;background:rgba(0,0,0,0.25);padding:10px;border-radius:10px;
+    font-size:14px;
+  }
+  #footer {
+    position:fixed; left:50%; transform:translateX(-50%); bottom:12px; color:#cbd5e1; font-size:13px;
+    background:rgba(0,0,0,0.2); padding:6px 10px; border-radius:8px;
+  }
+  button { border:none; background:#0ea5a3; color:#021922; padding:6px 10px; border-radius:6px; cursor:pointer; }
+  small { color:#9fb0c9; }
+  #powers { margin-top:8px; font-size:13px; }
+  .power { display:inline-block; margin-right:6px; padding:4px 6px; background:rgba(255,255,255,0.06); border-radius:6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div class="info"><strong>Mass:</strong> <span id="mass">1.0</span>  &nbsp; <strong>Temp:</strong> <span id="temp">0</span>°</div>
+  <div class="bar"><div id="tempbar" class="bar-inner"></div></div>
+  <div style="margin-top:8px;">
+    <button id="spawnAst">+ Astéroïde</button>
+    <button id="spawnCool">+ Cristal</button>
+    <button id="spawnBonus">+ Bonus</button>
+  </div>
+  <div id="powers"><strong>Pouvoirs actifs :</strong> <span id="powerList">—</span></div>
+</div>
+
+<div id="msg">Prototype : souris pour bouger. Nouveautés : spawns auto, bonus (invuln, aimant, réduction permanente), bots IA.</div>
+<div id="footer">Prototype Starvore — Solo & Bots — Amélioré</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W, H;
+  function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+  addEventListener('resize', resize);
+  resize();
+
+  // HUD elements
+  const massEl = document.getElementById('mass');
+  const tempEl = document.getElementById('temp');
+  const tempBar = document.getElementById('tempbar');
+  const powerListEl = document.getElementById('powerList');
+  document.getElementById('spawnAst').onclick = () => spawnBigAsteroid();
+  document.getElementById('spawnCool').onclick = () => spawnCoolCrystal();
+  document.getElementById('spawnBonus').onclick = () => spawnBonusPickup();
+
+  // Game state
+  let mouse = { x: W/2, y: H/2, down: false };
+  addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  addEventListener('mousedown', () => mouse.down = true);
+  addEventListener('mouseup', () => mouse.down = false);
+
+  // Player star
+  const player = {
+    id: 'player',
+    x: W/2, y: H/2,
+    vx:0, vy:0,
+    mass: 2,
+    temp: 0,
+    tempMax: 100,
+    radiusFactor: 8,
+    speedFactor: 0.08,
+    colorHue: 50,
+    alive: true,
+    score: 0,
+    powers: { } // active powers with expire ticks or permanent flags
+  };
+  function massToRadius(m) { return Math.sqrt(m) * player.radiusFactor; }
+
+  // Entities
+  const dusts = [];
+  const asteroids = [];
+  const crystals = [];
+  const bonuses = []; // bonus pickups (invuln, magnet, coolperm)
+  const bots = [];
+  const supernovas = [];
+
+  // Utility random
+  const rand = (a,b) => a + Math.random()*(b-a);
+
+  // ----- INITIAL SPAWN -----
+  function spawnDust(n=200) {
+    for (let i=0;i<n;i++){
+      dusts.push({
+        x: Math.random()*W,
+        y: Math.random()*H,
+        vx: rand(-0.05,0.05),
+        vy: rand(-0.05,0.05),
+        mass: rand(0.02,0.25)
+      });
+    }
+  }
+  spawnDust(240);
+
+  // Asteroid spawn (with adjustable force)
+  function spawnAsteroid() {
+    const side = Math.random();
+    const margin = 40;
+    let x = rand(margin, W-margin), y = rand(margin, H-margin);
+    if (side < 0.25) { x = -60; y = rand(0,H); }
+    else if (side < 0.5) { x = W+60; y = rand(0,H); }
+    else if (side < 0.75) { x = rand(0,W); y = -60; }
+    else { x = rand(0,W); y = H+60; }
+    asteroids.push({
+      x, y,
+      vx: rand(-0.6,0.6),
+      vy: rand(-0.6,0.6),
+      mass: rand(2, 12),
+      rot: rand(0,Math.PI*2),
+      vrots: rand(-0.02,0.02)
+    });
+  }
+  function spawnBigAsteroid() { for(let i=0;i<3;i++) spawnAsteroid(); }
+
+  // cooling crystal
+  function spawnCoolCrystal() {
+    crystals.push({
+      x: rand(50, W-50), y: rand(50, H-50),
+      vx: rand(-0.25,0.25), vy: rand(-0.25,0.25),
+      power: rand(18, 36), // temp decrease
+      life: 45*10 // frames ~ some seconds
+    });
+  }
+
+  // Bonus pickups (temporary powers)
+  // types: invuln (duration), magnet (duration), coolperm (permanent heat reduction)
+  function spawnBonusPickup() {
+    const types = ['invuln','magnet','coolperm'];
+    const t = types[Math.floor(Math.random()*types.length)];
+    bonuses.push({
+      x: rand(60, W-60), y: rand(60, H-60),
+      vx: rand(-0.2,0.2), vy: rand(-0.2,0.2),
+      type: t,
+      life: 40*12 // lifetime
+    });
+  }
+
+  // initial small spawns
+  for (let i=0;i<6;i++) spawnAsteroid();
+  for (let i=0;i<3;i++) spawnCoolCrystal();
+  for (let i=0;i<2;i++) spawnBonusPickup();
+
+  // ----- BOTS (IA) -----
+  // create N bots with random starting mass
+  function spawnBot() {
+    const b = {
+      id: 'bot' + (bots.length+1),
+      x: rand(0,W), y: rand(0,H),
+      vx: 0, vy: 0,
+      mass: rand(1.2, 6),
+      temp: rand(0,10),
+      colorHue: rand(180,320),
+      target: null,
+      speedFactor: 0.05 + Math.random()*0.06,
+      alive: true,
+      score: 0,
+      powers: {}
+    };
+    bots.push(b);
+  }
+  // spawn a few bots
+  for (let i=0;i<4;i++) spawnBot();
+
+  // ----- SPAWN SCHEDULER (auto spawn asteroids/crystals/bonuses) -----
+  let spawnTimer = 0;
+  // adjust rates here:
+  const SPAWN_RATES = {
+    dustChancePerTick: 0.06,     // probability per tick to spawn small dust
+    asteroidChancePerTick: 0.02, // asteroids
+    crystalChancePerTick: 0.007, // cooling crystals
+    bonusChancePerTick: 0.003    // special bonuses
+  };
+
+  // ----- GAME LOOP -----
+  let tick = 0;
+
+  function handleSpawns() {
+    // dust
+    if (Math.random() < SPAWN_RATES.dustChancePerTick) spawnDust(1 + Math.floor(Math.random()*3));
+    // asteroid(s)
+    if (Math.random() < SPAWN_RATES.asteroidChancePerTick) spawnAsteroid();
+    // crystal
+    if (Math.random() < SPAWN_RATES.crystalChancePerTick) spawnCoolCrystal();
+    // bonus
+    if (Math.random() < SPAWN_RATES.bonusChancePerTick) spawnBonusPickup();
+    // occasionally spawn a new bot (keeps it dynamic)
+    if (Math.random() < 0.0015 && bots.length < 12) spawnBot();
+  }
+
+  // ----- POWERS HANDLING -----
+  // power durations (in ticks)
+  const POWER_DUR = { invuln: 60*6, magnet: 60*7 }; // about seconds at 60fps
+  function activatePower(entity, type) {
+    if (type === 'coolperm') {
+      // permanent reduction: lower temp increase rate by a flat factor
+      entity.powers.coolperm = (entity.powers.coolperm||0) + 1; // stackable
+    } else {
+      entity.powers[type] = POWER_DUR[type];
+    }
+  }
+  function updatePowers(entity) {
+    // decrease timers
+    for (const k of Object.keys(entity.powers)) {
+      if (k === 'coolperm') continue;
+      entity.powers[k]--;
+      if (entity.powers[k] <= 0) delete entity.powers[k];
+    }
+  }
+
+  // ----- COLLISION UTILITIES -----
+  function dist2(a,b) { const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
+
+  // ----- MAIN UPDATE -----
+  function update(dt) {
+    // player movement (unless dead)
+    if (player.alive) {
+      const desiredVX = (mouse.x - player.x) * player.speedFactor;
+      const desiredVY = (mouse.y - player.y) * player.speedFactor;
+      const inertia = Math.min(0.98, 0.995 - Math.log(player.mass+1)*0.002);
+      player.vx = player.vx * inertia + desiredVX * (1-inertia);
+      player.vy = player.vy * inertia + desiredVY * (1-inertia);
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
+    }
+
+    // bots AI movement
+    for (const b of bots) {
+      if (!b.alive) continue;
+      // simple target selection: prefer food (dust), crystals, asteroids, then randomly chase smaller players
+      let candidate = null;
+      let bestScore = Infinity;
+      const consider = (obj, weight) => {
+        const d2 = (b.x - obj.x)**2 + (b.y - obj.y)**2;
+        const score = d2 * weight - (obj.mass || 0)*1000;
+        if (score < bestScore) { bestScore = score; candidate = obj; }
+      };
+
+      // small bias: sometimes target player if smaller
+      if (Math.random() < 0.02) {
+        if (player.alive && b.mass > player.mass * 1.05) consider(player, 0.6);
+      }
+
+      for (const d of dusts) consider(d, 0.8);
+      for (const c of crystals) consider(c, 0.6);
+      for (const a of asteroids) consider(a, 0.9);
+      for (const bo of bots) if (bo !== b && bo.alive && b.mass > bo.mass*1.05) consider(bo, 0.65);
+
+      if (!candidate || Math.random() < 0.02) {
+        // wander
+        b.vx += rand(-0.02,0.02);
+        b.vy += rand(-0.02,0.02);
+      } else {
+        // move toward candidate (simple steering)
+        const desiredVX = (candidate.x - b.x) * b.speedFactor * 0.9;
+        const desiredVY = (candidate.y - b.y) * b.speedFactor * 0.9;
+        b.vx = b.vx * 0.92 + desiredVX * 0.08;
+        b.vy = b.vy * 0.92 + desiredVY * 0.08;
+      }
+      b.x += b.vx * dt * (1 + Math.log(b.mass+1)*0.02);
+      b.y += b.vy * dt * (1 + Math.log(b.mass+1)*0.02);
+
+      // keep in bounds
+      if (b.x < -200) b.x = -200; if (b.x > W+200) b.x = W+200;
+      if (b.y < -200) b.y = -200; if (b.y > H+200) b.y = H+200;
+
+      // passive temp adjustments
+      b.temp = Math.max(0, b.temp - (Math.log(b.mass+1)*0.015*dt));
+      if (b.mass > 12) b.temp += (b.mass-12) * 0.002 * dt;
+      // handle powers timers
+      updatePowers(b);
+    }
+
+    // update dusts
+    for (let i=dusts.length-1;i>=0;i--) {
+      const d = dusts[i];
+      d.x += d.vx * dt;
+      d.y += d.vy * dt;
+      if (d.x < -20) d.x = W+20;
+      if (d.x > W+20) d.x = -20;
+      if (d.y < -20) d.y = H+20;
+      if (d.y > H+20) d.y = -20;
+    }
+
+    // player magnet effect (attract dusts/asteroids/crystals) if active
+    const playerHasMagnet = !!player.powers.magnet;
+
+    // collisions: player with dusts
+    for (let i=dusts.length-1;i>=0;i--) {
+      const d = dusts[i];
+      // magnet effect: attract if power active
+      if (playerHasMagnet) {
+        const dx = player.x - d.x, dy = player.y - d.y, dd = Math.sqrt(dx*dx + dy*dy);
+        if (dd < 400) {
+          d.vx += (dx/dd) * 0.5;
+          d.vy += (dy/dd) * 0.5;
+        }
+      }
+      // collision player
+      if (player.alive) {
+        const rP = massToRadius(player.mass);
+        const dx = d.x - player.x, dy = d.y - player.y;
+        const dist2 = dx*dx + dy*dy;
+        if (dist2 < (rP + (Math.sqrt(d.mass)*3))**2) {
+          player.mass += d.mass;
+          player.temp += d.mass * 0.8 * Math.max(0.2, 1 - (player.powers.coolperm||0)*0.12);
+          player.score += Math.round(d.mass*10);
+          dusts.splice(i,1);
+          continue;
+        }
+      }
+      // collision with bots
+      for (const b of bots) {
+        if (!b.alive) continue;
+        const rB = massToRadius(b.mass);
+        const dx = d.x - b.x, dy = d.y - b.y;
+        if (dx*dx + dy*dy < (rB + (Math.sqrt(d.mass)*3))**2) {
+          b.mass += d.mass * 0.98;
+          b.temp += d.mass * 0.6;
+          b.score += Math.round(d.mass*10);
+          dusts.splice(i,1);
+          break;
+        }
+      }
+    }
+
+    // update asteroids (movement + collisions)
+    for (let i=asteroids.length-1;i>=0;i--) {
+      const a = asteroids[i];
+      a.x += a.vx * dt;
+      a.y += a.vy * dt;
+      a.rot += a.vrots * dt;
+      if (a.x < -200 || a.x > W+200 || a.y < -200 || a.y > H+200) { asteroids.splice(i,1); continue; }
+
+      // magnet interactions
+      if (playerHasMagnet) {
+        const dx = player.x - a.x, dy = player.y - a.y;
+        const dd = Math.sqrt(dx*dx + dy*dy);
+        if (dd < 250 && player.mass > a.mass*0.4) {
+          a.vx += (dx/dd) * 0.2;
+          a.vy += (dy/dd) * 0.2;
+        }
+      }
+
+      // player collision with asteroid
+      if (player.alive) {
+        const rP = massToRadius(player.mass);
+        const rA = massToRadius(a.mass) * 1.2;
+        const dx = a.x - player.x, dy = a.y - player.y;
+        const dist2v = dx*dx + dy*dy;
+        if (dist2v < (rP + rA)**2) {
+          if (player.powers.invuln) {
+            // invuln: simply absorb with less temp cost
+            if (player.mass > a.mass * 0.6) {
+              player.mass += a.mass * 0.9;
+              player.temp += a.mass * 1.2 * Math.max(0.2, 1 - (player.powers.coolperm||0)*0.12);
+              player.score += Math.round(a.mass*10);
+              asteroids.splice(i,1); continue;
+            }
+          } else if (player.mass > a.mass * 0.9) {
+            player.mass += a.mass * 0.95;
+            player.temp += a.mass * 3 * Math.max(0.2, 1 - (player.powers.coolperm||0)*0.12);
+            player.score += Math.round(a.mass*10);
+            asteroids.splice(i,1); continue;
+          } else {
+            // heavier asteroid knocks player back and damages mass/temp
+            const angle = Math.atan2(dy,dx);
+            const push = 10 + Math.sqrt(a.mass);
+            player.vx -= Math.cos(angle) * push * 0.04;
+            player.vy -= Math.sin(angle) * push * 0.04;
+            player.mass = Math.max(0.8, player.mass - a.mass*0.06);
+            player.temp += a.mass * 1.5;
+          }
+        }
+      }
+
+      // bots collision with asteroids
+      for (const b of bots) {
+        if (!b.alive) continue;
+        const rB = massToRadius(b.mass);
+        const rA = massToRadius(a.mass) * 1.2;
+        const dx = a.x - b.x, dy = a.y - b.y;
+        if (dx*dx + dy*dy < (rB + rA)**2) {
+          if (b.mass > a.mass * 0.9) {
+            b.mass += a.mass * 0.95;
+            b.temp += a.mass * 2.6;
+            b.score += Math.round(a.mass*10);
+            asteroids.splice(i,1);
+            break;
+          } else {
+            b.mass = Math.max(0.6, b.mass - a.mass*0.05);
+            b.vx -= Math.sign(dx)*0.2; b.vy -= Math.sign(dy)*0.2;
+          }
+        }
+      }
+    }
+
+    // crystals (cooling) collisions
+    for (let i=crystals.length-1;i>=0;i--) {
+      const c = crystals[i];
+      c.x += c.vx * dt; c.y += c.vy * dt;
+      c.life--;
+      if (c.life <= 0) { crystals.splice(i,1); continue; }
+      // player collision
+      if (player.alive) {
+        const rP = massToRadius(player.mass);
+        const rC = 12 + c.power*0.15;
+        const dx = c.x - player.x, dy = c.y - player.y;
+        if (dx*dx + dy*dy < (rP + rC)**2) {
+          player.temp = Math.max(0, player.temp - c.power);
+          player.score += Math.round(c.power*2);
+          crystals.splice(i,1); continue;
+        }
+      }
+      // bots collision
+      for (const b of bots) {
+        if (!b.alive) continue;
+        const rB = massToRadius(b.mass);
+        const rC = 12 + c.power*0.15;
+        const dx = c.x - b.x, dy = c.y - b.y;
+        if (dx*dx + dy*dy < (rB + rC)**2) {
+          b.temp = Math.max(0, b.temp - c.power*0.85);
+          b.score += Math.round(c.power*2);
+          crystals.splice(i,1); break;
+        }
+      }
+    }
+
+    // bonuses pickups collisions
+    for (let i=bonuses.length-1;i>=0;i--) {
+      const bup = bonuses[i];
+      bup.x += bup.vx * dt; bup.y += bup.vy * dt;
+      bup.life--;
+      if (bup.life <= 0) { bonuses.splice(i,1); continue; }
+      // player pickup
+      if (player.alive) {
+        const rP = massToRadius(player.mass);
+        const dx = bup.x - player.x, dy = bup.y - player.y;
+        if (dx*dx + dy*dy < (rP + 18)**2) {
+          activatePower(player, bup.type);
+          player.score += 50;
+          bonuses.splice(i,1); continue;
+        }
+      }
+      // bots pickup
+      for (const bo of bots) {
+        if (!bo.alive) continue;
+        const rB = massToRadius(bo.mass);
+        const dx = bup.x - bo.x, dy = bup.y - bo.y;
+        if (dx*dx + dy*dy < (rB + 18)**2) {
+          activatePower(bo, bup.type);
+          bo.score += 40;
+          bonuses.splice(i,1); break;
+        }
+      }
+    }
+
+    // Player vs Bots collision (absorption rules)
+    for (let i=bots.length-1;i>=0;i--) {
+      const b = bots[i];
+      if (!b.alive) continue;
+      const rB = massToRadius(b.mass);
+      const rP = massToRadius(player.mass);
+      const dx = b.x - player.x, dy = b.y - player.y;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < (rB + rP)**2) {
+        // if either invuln, ignore or prefer absorption if bigger
+        if ((player.powers.invuln && b.mass < player.mass*1.05) || (player.mass > b.mass*1.08 && !b.powers.invuln)) {
+          // player absorbs bot
+          player.mass += b.mass * 0.9;
+          player.temp += b.mass * 2.4 * Math.max(0.2, 1 - (player.powers.coolperm||0)*0.12);
+          player.score += Math.round(b.score + b.mass*15);
+          b.alive = false;
+          bots.splice(i,1);
+          continue;
+        } else if (b.mass > player.mass*1.08 && !player.powers.invuln) {
+          // bot absorbs player
+          b.mass += player.mass * 0.9;
+          b.temp += player.mass * 2.6;
+          b.score += Math.round(player.score + player.mass*20);
+          triggerPlayerSupernova(); // player explodes (respawn)
+          break;
+        } else {
+          // bounce/shove
+          const angle = Math.atan2(dy,dx);
+          player.vx -= Math.cos(angle) * 0.5;
+          player.vy -= Math.sin(angle) * 0.5;
+          b.vx += Math.cos(angle) * 0.5;
+          b.vy += Math.sin(angle) * 0.5;
+        }
+      }
+    }
+
+    // passive cooling & heating (player)
+    const passiveCool = Math.log(player.mass+1) * 0.02 * dt;
+    player.temp = Math.max(0, player.temp - passiveCool);
+    // temperature increases over time if mass large (metabolic heating) reduced by coolperm stacks
+    const coolpermStacks = player.powers.coolperm || 0;
+    player.temp += Math.max(0, player.mass - 15) * 0.005 * dt * Math.max(0.3, 1 - 0.12*coolpermStacks);
+
+    if (player.mass < 0.6) player.mass = 0.6;
+    if (player.temp >= player.tempMax) triggerPlayerSupernova();
+
+    // bots temp & respawn check
+    for (let bi=bots.length-1; bi>=0; bi--) {
+      const bo = bots[bi];
+      if (bo.temp >= 150) {
+        // bot supernova: explode into pieces and lose mass, then respawn smaller
+        const n = Math.min(200, Math.round(bo.mass*3 + 20));
+        supernovas.push({ x: bo.x, y: bo.y, t:0, maxT: 70, pieces: generatePieces(n) });
+        bo.mass = Math.max(1, bo.mass*0.2);
+        bo.temp = 6;
+      }
+    }
+
+    // spawn periodic
+    if (tick % 5 === 0) handleSpawns();
+    tick++;
+    // slowly replenish dust if low
+    if (dusts.length < 160 && Math.random() < 0.8) spawnDust(3);
+  }
+
+  function generatePieces(n) {
+    const pieces = [];
+    for (let i=0;i<n;i++){
+      const ang = Math.random()*Math.PI*2;
+      pieces.push({
+        x: 0, y: 0,
+        vx: Math.cos(ang)*(Math.random()*6+1),
+        vy: Math.sin(ang)*(Math.random()*6+1),
+        life: Math.random()*60+30,
+        size: Math.random()*3+1,
+        hue: 30 + Math.random()*120
+      });
+    }
+    return pieces;
+  }
+
+  // Player supernova (separate to allow respawn visuals)
+  function triggerPlayerSupernova() {
+    if (!player.alive) return;
+    player.alive = false;
+    const n = Math.min(400, Math.round(player.mass * 4 + 40));
+    const pieces = [];
+    for (let i=0;i<n;i++){
+      const ang = Math.random()*Math.PI*2;
+      pieces.push({
+        x: player.x,
+        y: player.y,
+        vx: Math.cos(ang)*(Math.random()*8+1),
+        vy: Math.sin(ang)*(Math.random()*8+1),
+        life: Math.random()*70 + 40,
+        size: Math.random()*4 + 1,
+        hue: 30 + Math.random()*120
+      });
+    }
+    supernovas.push({ x: player.x, y: player.y, t:0, maxT: 110, pieces });
+  }
+
+  // ----- SUPERNOVA UPDATES -----
+  function updateSupernovas(dt) {
+    for (let si=supernovas.length-1; si>=0; si--) {
+      const s = supernovas[si];
+      s.t += 1;
+      for (let p of s.pieces) {
+        p.x += p.vx * (1 + s.t*0.01);
+        p.y += p.vy * (1 + s.t*0.01);
+        p.vx *= 0.995; p.vy *= 0.995;
+        p.life -= 1;
+      }
+      s.pieces = s.pieces.filter(p => p.life > 0);
+      if (s.t > s.maxT) {
+        supernovas.splice(si,1);
+        // respawn player if dead
+        if (!player.alive) {
+          player.mass = Math.max(1, player.mass * 0.18);
+          player.temp = 10;
+          player.x = Math.random()*W; player.y = Math.random()*H;
+          player.vx = player.vy = 0;
+          player.alive = true;
+          player.score = Math.max(0, Math.round(player.score * 0.6));
+        }
+      }
+    }
+  }
+
+  // ----- RENDER -----
+  function render() {
+    ctx.fillStyle = '#020617';
+    ctx.fillRect(0,0,W,H);
+
+    // starfield
+    for (let i=0;i<60;i++){
+      const x = (i*73 + (tick*0.18)) % W;
+      ctx.fillStyle = 'rgba(255,255,255,0.012)';
+      ctx.fillRect(x, (i*47)%H, 1, 1);
+    }
+
+    // dusts
+    for (const d of dusts) {
+      const r = Math.max(0.8, Math.sqrt(d.mass)*2);
+      const grd = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, r*6);
+      grd.addColorStop(0, 'rgba(255,255,220,0.9)');
+      grd.addColorStop(0.5, 'rgba(255,220,120,0.15)');
+      grd.addColorStop(1, 'rgba(255,220,120,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, r*6, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // crystals
+    for (const c of crystals) {
+      const r = 10 + c.power*0.15;
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate((tick*0.01) % (Math.PI*2));
+      ctx.beginPath();
+      for (let i=0;i<6;i++){
+        const ang = i*(Math.PI*2/6);
+        const rx = Math.cos(ang)*(r + Math.sin(tick*0.05+ i)*2);
+        const ry = Math.sin(ang)*(r + Math.cos(tick*0.05+ i)*2);
+        ctx.lineTo(rx, ry);
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(160,240,255,0.95)';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // bonuses visuals
+    for (const b of bonuses) {
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate((tick*0.02) % (Math.PI*2));
+      ctx.beginPath();
+      if (b.type === 'invuln') {
+        ctx.arc(0,0,14,0,Math.PI*2);
+        ctx.fillStyle = 'rgba(255,255,180,0.95)';
+        ctx.fill();
+        ctx.fillStyle = '#333';
+        ctx.fillRect(-6,-3,12,6);
+      } else if (b.type === 'magnet') {
+        ctx.beginPath();
+        ctx.moveTo(0,-14);
+        ctx.arc(0,-6,8,Math.PI,0);
+        ctx.arc(-6,-6,2,0,Math.PI*2);
+        ctx.fillStyle = 'rgba(200,200,255,0.95)';
+        ctx.fill();
+      } else if (b.type === 'coolperm') {
+        ctx.beginPath();
+        for (let i=0;i<5;i++){
+          ctx.lineTo(Math.cos(i*Math.PI*2/5)*14, Math.sin(i*Math.PI*2/5)*14);
+        }
+        ctx.fillStyle = 'rgba(180,255,200,0.95)';
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // asteroids
+    for (const a of asteroids) {
+      const r = massToRadius(a.mass) * 1.2;
+      ctx.save();
+      ctx.translate(a.x, a.y);
+      ctx.rotate(a.rot);
+      ctx.beginPath();
+      const bumps = 8;
+      for (let i=0;i<bumps;i++){
+        const ang = i*(Math.PI*2/bumps);
+        const rad = r * (0.68 + 0.32*Math.sin(i*2 + a.rot*5));
+        ctx.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+      }
+      ctx.closePath();
+      ctx.fillStyle = '#6b5447';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // bots (draw before player)
+    for (const b of bots) {
+      if (!b.alive) continue;
+      const r = massToRadius(b.mass);
+      // glow
+      const grd = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, r*5);
+      grd.addColorStop(0, `hsla(${b.colorHue},80%,70%,0.9)`);
+      grd.addColorStop(0.3, `hsla(${b.colorHue},70%,60%,0.18)`);
+      grd.addColorStop(1, `rgba(0,0,0,0)`);
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(b.x, b.y, r*4, 0, Math.PI*2); ctx.fill();
+
+      // body
+      ctx.beginPath();
+      const spikes = 9;
+      ctx.save(); ctx.translate(b.x,b.y);
+      for (let i=0;i<spikes;i++){
+        const ang = i*(Math.PI*2/spikes);
+        const mod = 1 + 0.06 * Math.sin(tick*0.04 + i);
+        const rad = r * (0.82 + 0.12*Math.sin(ang*3 + tick*0.02)) * mod;
+        ctx.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+      }
+      ctx.closePath();
+      ctx.fillStyle = `hsl(${b.colorHue}, 70%, ${40 - Math.min(16, b.temp/8)}%)`;
+      ctx.fill();
+      ctx.restore();
+
+      // small text (mass)
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = '400 10px Inter, Roboto';
+      ctx.fillText(Math.round(b.mass), b.x - 10, b.y - r - 6);
+    }
+
+    // player
+    if (player.alive) {
+      const r = massToRadius(player.mass);
+      const hue = Math.max(20, Math.min(60 + (player.temp/player.tempMax)*120, 360));
+      const grd = ctx.createRadialGradient(player.x, player.y, 0, player.x, player.y, r*6);
+      grd.addColorStop(0, `hsla(${hue},100%,70%,0.95)`);
+      grd.addColorStop(0.3, `hsla(${hue},90%,60%,0.25)`);
+      grd.addColorStop(1, `rgba(0,0,0,0)`);
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(player.x, player.y, r*4, 0, Math.PI*2); ctx.fill();
+
+      ctx.save(); ctx.translate(player.x, player.y);
+      const spikes = 11;
+      ctx.beginPath();
+      for (let i=0;i<spikes;i++){
+        const ang = i*(Math.PI*2/spikes);
+        const mod = 1 + 0.08 * Math.sin(tick*0.04 + i);
+        const rad = r * (0.8 + 0.18*Math.sin(ang*3 + tick*0.03) ) * mod;
+        ctx.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+      }
+      ctx.closePath();
+      ctx.fillStyle = `hsl(${hue}, 90%, ${50 - Math.min(20, player.temp/6)}%)`;
+      ctx.fill();
+      ctx.restore();
+
+      // corona ring
+      ctx.beginPath();
+      ctx.strokeStyle = `rgba(255,240,200,${0.06 + Math.min(0.5, player.temp/200)})`;
+      ctx.lineWidth = Math.min(10, r*0.08 + player.temp*0.012);
+      ctx.arc(player.x, player.y, r*2.2 + Math.sin(tick*0.02)*3, 0, Math.PI*2);
+      ctx.stroke();
+
+      // invuln ring indicator
+      if (player.powers.invuln) {
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6,4]);
+        ctx.arc(player.x, player.y, r*2.9, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // supernovas pieces
+    for (let s of supernovas) {
+      for (let p of s.pieces) {
+        ctx.beginPath();
+        ctx.fillStyle = `hsla(${p.hue},90%,60%,${Math.max(0.02, p.life/120)})`;
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+        ctx.fill();
+      }
+      const shockR = s.t * 6;
+      ctx.beginPath();
+      ctx.lineWidth = Math.max(0, 6 - s.t*0.06);
+      ctx.strokeStyle = `rgba(255,210,120,${Math.max(0, 1 - s.t/s.maxT)})`;
+      ctx.arc(s.x, s.y, shockR, 0, Math.PI*2);
+      ctx.stroke();
+    }
+
+    // HUD overlay score
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.font = '400 13px Inter, Roboto, sans-serif';
+    ctx.fillText('Score: ' + Math.round(player.score), 14, H - 18);
+  }
+
+  // ----- MAIN LOOP -----
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(1.6, (now - last) * 0.06);
+    last = now;
+    update(dt);
+    updateSupernovas(dt);
+    render();
+    // HUD DOM
+    massEl.textContent = player.mass.toFixed(2);
+    tempEl.textContent = Math.round(player.temp);
+    tempBar.style.width = Math.min(100, (player.temp / player.tempMax)*100) + '%';
+
+    // show active powers
+    const active = [];
+    for (const k in player.powers) {
+      if (k === 'coolperm') active.push(`coolperm x${player.powers.coolperm}`);
+      else active.push(`${k} ${Math.ceil(player.powers[k]/60)}s`);
+    }
+    powerListEl.textContent = active.length ? active.join(' • ') : '—';
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // debug
+  console.log('Prototype amélioré ready: auto spawns, bonuses, bots IA active.');
+
+})();
+</script>
+</body>
+</html>
+
+
+
